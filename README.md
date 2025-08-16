@@ -1,2 +1,2 @@
-# home-assistant-hungaromet
+# home-assistant-hungaro-met
 HungaroMet Home Assistant integration

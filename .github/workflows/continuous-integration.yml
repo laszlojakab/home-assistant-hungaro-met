@@ -1,0 +1,23 @@
+name: Continuous integration
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linters:
+    name: Linters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+      - run: uv sync
+      - run: uv run ruff check

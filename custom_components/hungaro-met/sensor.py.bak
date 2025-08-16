@@ -1,0 +1,723 @@
+from datetime import datetime
+from typing import Any, Literal, Self, assert_never
+
+import numpy as np
+import pandas as pd
+from homeassistant.components.sensor import (
+    RestoreSensor,
+    SensorEntityDescription,
+)
+from homeassistant.components.sensor.const import SensorDeviceClass, SensorStateClass
+from homeassistant.const import (
+    ATTR_LATITUDE,
+    ATTR_LONGITUDE,
+    CONF_ELEVATION,
+    CONF_ZONE,
+    DEGREE,
+    PERCENTAGE,
+    UV_INDEX,
+    EntityCategory,
+    UnitOfIrradiance,
+    UnitOfLength,
+    UnitOfPressure,
+    UnitOfSpeed,
+    UnitOfTemperature,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from . import HungaroMetConfigEntry
+from .api import CloudMask
+from .const import CLIMATE_TYPE, LOGGER
+from .coordinator import (
+    HungaroMet10MinDataUpdateCoordinator,
+    HungaroMetMsgCloudTypeDataUpdateCoordinator,
+)
+
+# class OdpTotalIncreasingSensor(CoordinatorEntity, RestoreSensor):
+#     def __init__(self, coordinator) -> None:
+#         self._latest_value = None
+#         self._latest_observation_time_stamp = None
+
+
+class HungaroMetSensor(CoordinatorEntity, RestoreSensor):
+    def __init__(
+        self,
+        location_name: str,  # TODO
+        coordinator: HungaroMet10MinDataUpdateCoordinator,
+        entity_description: SensorEntityDescription,
+        prop: str,
+        transformer=lambda x: x,
+    ) -> None:
+        super().__init__(coordinator)
+
+        # self._location_name = location_name
+        self.entity_description = entity_description
+        self._observation_time = None
+        self._value = None
+        self._property = prop
+
+        self._unprocessed_items = []
+        self._current_item = None
+        self._unsubscribe_timer = None
+
+        self._attr_entity_registry_enabled_default = False
+        self._transformer = transformer
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+
+        try:
+            last_state = await self.async_get_last_state()
+            if last_state is not None:
+                observation_time = last_state.attributes.get("observation_time")
+
+                last_sensor_data = await self.async_get_last_sensor_data()
+                if last_sensor_data is not None:
+                    native_value = last_sensor_data.native_value
+
+                    self._current_item = {
+                        "value": native_value,
+                        "time": observation_time,
+                    }
+        except Exception as e:
+            LOGGER.error(e)
+            self._current_item = None
+
+    # @property
+    # def device_info(self: Self) -> DeviceInfo:
+    #     """Returns the device information."""
+    #     return DeviceInfo(
+    #         entry_type=DeviceEntryType.SERVICE,
+    #         configuration_url="https://odp.met.hu",
+    #         manufacturer="HungaroMet",
+    #         identifiers={
+    #             (
+    #                 "hungaromet",
+    #                 self._location_name,  # TODO: koordinatat bevezetni lokacio helyett (vagy valami zone azonositot)
+    #             )
+    #         },
+    #         name=self._invoice_issuer.display_name,
+    #     )
+
+    def _process_unprocessed_data(self):
+        data = self.coordinator.data
+        if data is None:
+            return
+
+        if self._current_item is not None and self._current_item["time"]:
+            data = data.loc[data.index > self._current_item["time"]]
+        else:
+            data = data.iloc[[-1]]
+
+        if len(data) == 0:
+            return
+
+        self._unprocessed_items = list(data[self._property].dropna().items())
+        self._schedule_next()
+
+    def _schedule_next(self):
+        if self._unsubscribe_timer:
+            self._unsubscribe_timer()
+            self._unsubscribe_timer = None
+
+        if not self._unprocessed_items:
+            return
+
+        next_timestamp, next_value = self._unprocessed_items.pop(0)
+        self._current_item = {
+            "value": next_value,
+            "time": next_timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+        self.async_write_ha_state()
+
+        async def _delayed_update(now):
+            self._schedule_next()
+
+        self._unsubscribe_timer = async_call_later(self.hass, 1, _delayed_update)
+
+    def _handle_coordinator_update(self) -> None:
+        self._process_unprocessed_data()
+
+    @property
+    def native_value(self):
+        return self._transformer(self._current_item["value"]) if self._current_item else None
+
+    @property
+    def extra_state_attributes(self):
+        if self._current_item:
+            return {"observation_time": self._current_item["time"]}
+
+        return {}
+
+
+class HungaroMetCloudinessSensor(CoordinatorEntity, RestoreSensor):
+    def __init__(
+        self,
+        location_name: str,
+        coordinator: HungaroMetMsgCloudTypeDataUpdateCoordinator,
+    ) -> None:
+        super().__init__(coordinator)
+
+        self._location_name = location_name
+        self._observation_time = None
+        self._value = None
+
+        self.entity_description = SensorEntityDescription(
+            key="cloud_coverage",
+            name=f"HungaroMet - {location_name} cloud coverage",
+            state_class=SensorStateClass.MEASUREMENT,
+            icon="mdi:weather-cloudy",
+            native_unit_of_measurement=PERCENTAGE,
+        )
+
+        # self._attr_entity_registry_enabled_default = False
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+
+        # try:
+        #     last_state = await self.async_get_last_state()
+        #     if last_state is not None:
+        #         observation_time = last_state.attributes.get("observation_time")
+
+        #         last_sensor_data = await self.async_get_last_sensor_data()
+        #         if last_sensor_data is not None:
+        #             native_value = last_sensor_data.native_value
+
+        #             self._current_item = {
+        #                 "value": native_value,
+        #                 "time": observation_time,
+        #             }
+        # except Exception as e:
+        #     LOGGER.error(e)
+        #     self._current_item = None
+
+    # def _process_unprocessed_data(self):
+    #     data = self.coordinator.data
+    #     if data is None:
+    #         return
+
+    #     if self._current_item is not None:
+    #         data = data.loc[data.index > self._current_item["time"]]
+    #     else:
+    #         data = data.iloc[[-1]]
+
+    #     if len(data) == 0:
+    #         return
+
+    #     self._unprocessed_items = list(data[self._property].dropna().items())
+    #     self._schedule_next()
+
+    # def _schedule_next(self):
+    #     if self._unsubscribe_timer:
+    #         self._unsubscribe_timer()
+    #         self._unsubscribe_timer = None
+
+    #     if not self._unprocessed_items:
+    #         return
+
+    #     next_timestamp, next_value = self._unprocessed_items.pop(0)
+    #     self._current_item = {
+    #         "value": next_value,
+    #         "time": next_timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    #     }
+
+    #     self.async_write_ha_state()
+
+    #     async def _delayed_update(now):
+    #         self._schedule_next()
+
+    #     self._unsubscribe_timer = async_call_later(self.hass, 1, _delayed_update)
+
+    # def _handle_coordinator_update(self) -> None:
+    #     self._process_unprocessed_data()
+
+    @property
+    def native_value(self):
+        data: dict[datetime, CloudMask] | None = self.coordinator.data
+
+        if data is None:
+            return None
+
+        return data[-1][1].cloudiness
+
+    @property
+    def extra_state_attributes(self):
+        data: dict[datetime, CloudMask] | None = self.coordinator.data
+
+        if data is None:
+            return {}
+
+        return {"observation_time": data[-1][0]}
+
+
+class OdpPrecipitationSensor(CoordinatorEntity, RestoreSensor):
+    def __init__(self, location_name, coordinator: HungaroMet10MinDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+
+        self.entity_description = SensorEntityDescription(
+            key="total_rain",
+            name=f"HungaroMet - {location_name} total rain",
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            device_class=SensorDeviceClass.PRECIPITATION,
+            icon="mdi:weather-pouring",
+            native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+        )
+        self._latest_value = None
+        self._latest_observation_time_stamp = None
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+
+        if self._latest_observation_time_stamp is not None:
+            unprocessed_data = self.coordinator.data.loc[
+                self.coordinator.data.index > self._latest_observation_time_stamp
+            ]["r"]
+        else:
+            unprocessed_data = self.coordinator.data["r"]
+            self._latest_observation_time_stamp = (
+                unprocessed_data.dropna().index.max().strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
+
+            unprocessed_data = unprocessed_data.drop(unprocessed_data.index)
+
+        if len(unprocessed_data) > 0:
+            self._latest_observation_time_stamp = (
+                unprocessed_data.dropna().index.max().strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
+            self._latest_value = (self._latest_value or 0) + unprocessed_data.sum()
+
+        return self._latest_value
+
+    async def async_added_to_hass(self) -> None:
+        """Executed when the sensor is added to Home Assistant."""
+        await super().async_added_to_hass()
+
+        try:
+            last_state = await self.async_get_last_state()
+            if last_state is not None:
+                self._latest_observation_time_stamp = last_state.attributes.get(
+                    "latest_observation_time_stamp"
+                )
+
+            last_sensor_data = await self.async_get_last_sensor_data()
+            if last_sensor_data is not None:
+                self._latest_value = last_sensor_data.native_value
+        except Exception as e:
+            LOGGER.error(e)
+            self._latest_observation_time_stamp = None
+            self._latest_value = None
+
+    @property
+    def state_attributes(self) -> dict[str, Any]:
+        return {
+            "latest_observation_time_stamp": self._latest_observation_time_stamp,
+            "latest_value": self._latest_value,
+        }
+
+
+class OdpReferenceEvapotranspiration(CoordinatorEntity, RestoreSensor):
+    def __init__(
+        self,
+        location_name,
+        coordinator: HungaroMet10MinDataUpdateCoordinator,
+    ) -> None:
+        super().__init__(coordinator)
+
+        self.entity_description = SensorEntityDescription(
+            key="total_rain",
+            name=f"HungaroMet - {location_name} total reference evapotranspiration",
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            device_class=SensorDeviceClass.PRECIPITATION,
+            icon="mdi:weather-sunny-alert",
+            native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+        )
+        self._latest_value = None
+        self._latest_observation_time_stamp = None
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+
+        if self._latest_observation_time_stamp is not None:
+            unprocessed_data = self.coordinator.data["eto"].loc[
+                self.coordinator.data.index > self._latest_observation_time_stamp
+            ]
+        else:
+            unprocessed_data = self.coordinator.data["eto"]
+            self._latest_observation_time_stamp = (
+                unprocessed_data.dropna().index.max().strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
+            unprocessed_data = unprocessed_data.drop(unprocessed_data.index)
+
+        if len(unprocessed_data) > 0:
+            self._latest_observation_time_stamp = (
+                unprocessed_data.dropna().index.max().strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
+            self._latest_value = (self._latest_value or 0) + unprocessed_data.sum()
+
+        return self._latest_value
+
+    async def async_added_to_hass(self) -> None:
+        """Executed when the sensor is added to Home Assistant."""
+        await super().async_added_to_hass()
+
+        try:
+            last_state = await self.async_get_last_state()
+            if last_state is not None:
+                self._latest_observation_time_stamp = last_state.attributes.get(
+                    "latest_observation_time_stamp"
+                )
+
+            last_sensor_data = await self.async_get_last_sensor_data()
+            if last_sensor_data is not None:
+                self._latest_value = last_sensor_data.native_value
+        except Exception as e:
+            LOGGER.exception(e)
+            self._latest_observation_time_stamp = None
+            self._latest_value = None
+
+    @property
+    def state_attributes(self) -> dict[str, Any]:
+        return {
+            "latest_observation_time_stamp": self._latest_observation_time_stamp,
+            "latest_value": self._latest_value,
+        }
+
+    # def _calculate_eto(
+    #     self,
+    #     df: pd.DataFrame,
+    #     longitude: float,
+    #     latitude: float,
+    #     z: float,
+    #     alpha: float,
+    #     tl: float,
+    #     climate: Literal["humid", "sub-humid", "semi-arid", "arid"],
+    # ) -> pd.Series:
+    #     tz_offset = longitude // 15
+
+    #     time = df.index
+
+    #     # The incoming solar radiation [MJ m-2 perid-1]
+    #     Rs = df["global_irradiance"] * (
+    #         tl * 3600 / 10e5
+    #     )  # converting W m-2 to MJ m-2 period-1
+
+    #     # Net solar or shortwave radiation [MJ m-2 period-1]
+    #     Rns = (1 - alpha) * Rs
+
+    #     # Stefan-Boltzmann constant [W·m⁻²·K⁻⁴]
+    #     sigma = 5.670374419e-8
+
+    #     # J is the number of the day in the year between 1 (1 January) and 365 or 366 (31 December)
+    #     J = time.dayofyear
+
+    #     # Inverse relative distance Earth-Sun (Equation 23)
+    #     dr = 1 + 0.033 * np.cos(2 * np.pi / (365 + time.is_leap_year.astype(int)) * J)
+
+    #     # Standard clock time at the midpoint of the period [hour]. For example for aperiod between 14.00 and 15.00 hours, t = 14.5,
+    #     t = time.hour + (time.minute / 60.0) - tl / 2
+
+    #     # Longitude of the centre of the local time zone [degrees west of Greenwich]. For example, Lz = 75, 90, 105 and 120° for the Eastern, Central, Rocky Mountain and Pacific time zones (United States) and Lz = 0° for Greenwich, 330° for Cairo (Egypt), and 255° for Bangkok (Thailand),
+    #     L_z = 15 * tz_offset
+    #     # Longitude of the measurement site [degrees west of Greenwich],
+    #     L_m = longitude
+    #     # Seasonal correction coefficient
+    #     b = 2 * np.pi * (J - 81) / 364
+    #     # Seasonal correction for solar time [hour]. (Equation 32)
+    #     S_c = 0.1645 * np.sin(2 * b) - 0.1255 * np.cos(b) - 0.025 * np.sin(b)
+
+    #     # Solar time angle at midpoint of hourly or shorter period [rad], (Equation 31)
+    #     omega = np.pi / 12 * ((t + 0.06667 * (L_z - L_m) + S_c) - 12)
+
+    #     # Solar time angle at beginning of period [rad] (Equation 29)
+    #     omega1 = omega - np.pi * tl / 24
+    #     # Solar time angle at end of period [rad] (Equation 30).
+    #     omega2 = omega + np.pi * tl / 24
+
+    #     # Latitude in radians
+    #     phi = np.radians(latitude)
+
+    #     # Solar declination [rad] (Equation 24)
+    #     small_delta = 0.409 * np.sin(
+    #         2 * np.pi / (365 + time.is_leap_year.astype(int)) * J - 1.39
+    #     )
+
+    #     # Solar constant = 0.0820 MJ m-2 min-1
+    #     Gsc = 0.082
+
+    #     # Extraterrestrial radiation [MJ m-2 period-1] (Equation 28)
+    #     Ra = pd.Series(
+    #         (
+    #             12
+    #             * 60
+    #             / np.pi
+    #             * Gsc
+    #             * dr
+    #             * (
+    #                 (omega2 - omega1) * np.sin(phi) * np.sin(small_delta)
+    #                 + np.cos(phi)
+    #                 * np.cos(small_delta)
+    #                 * (np.sin(omega2) - np.sin(omega1))
+    #             )
+    #         ),
+    #         index=df.index,
+    #     ).clip(lower=0)
+
+    #     # Day or night time
+    #     is_day = (Ra > 0).astype(float)
+
+    #     # Calculated (Equation 36 or 37) clear-sky radiation [MJ m-2 period-1].
+    #     Rso = (0.75 + 2 * 0.0001 * z) * Ra
+
+    #     def get_rs_rso_for_night_time(
+    #         climate: Literal["humid", "sub-humid", "semi-arid", "arid"],
+    #     ) -> float:
+    #         match climate:
+    #             case "humid":
+    #                 return 0.45
+    #             case "sub-humid":
+    #                 return 0.55
+    #             case "semi-arid":
+    #                 return 0.7
+    #             case "arid":
+    #                 return 0.8
+    #             case _:
+    #                 assert_never(climate)
+
+    #     # R_s/R_so limited to 1 and defaulted based on climate for night time
+    #     Rs_Rso = (
+    #         (Rs / Rso)
+    #         .clip(upper=1)
+    #         .replace([np.inf, np.nan, -np.inf], get_rs_rso_for_night_time(climate))
+    #     )
+
+    #     # Actual vapour pressure [kPa] (Equation 54)
+    #     ea = (
+    #         df["relative_humidity"]
+    #         / 100
+    #         * 0.6108
+    #         * np.exp(17.27 * df["temperature"] / (df["temperature"] + 237.3))
+    #     )
+
+    #     # Outgoing energy [MJ m-2 period-1]
+    #     E = sigma * tl * 3600 * 1e-6 * (df["temperature"] + 273.16) ** 4
+
+    #     # Net longwave radiation [MJ m-2 period-1]
+    #     Rnl = E * (0.34 - 0.14 * ea**0.5) * (1.35 * Rs_Rso - 0.35)
+
+    #     # Net radiation at the grass surface [MJ m-2 period-1] (Equation 40),
+    #     Rn = Rns - Rnl
+
+    #     # Soil heat flux density [MJ m-2 period-1] (Equations 45 and 46),
+    #     G = np.where(is_day == 1, 0.1, 0.5) * Rn
+
+    #     # Specific heat at fconstant pressure, 1.013 10-3 [MJ kg-1 °C-1],
+    #     c_p = 1.013e-3
+
+    #     # Ratio molecular weight of water vapour/dry air
+    #     epsilon = 0.622
+
+    #     # Latent heat of vaporization, 2.45 [MJ kg-1],
+    #     lambda_ = 2.45
+
+    #     # Psychrometric constant [kPa °C-1] (Equation 8),
+    #     gamma = c_p * df["pressure"] / (epsilon * lambda_)
+
+    #     # Average wind speed [m s-1]
+    #     u2 = df["wind_speed"]
+
+    #     # Saturation vapour pressure at air temperature Thr [kPa] (Equation 11)
+    #     E0_thr = 0.6108 * np.exp(
+    #         17.27 * df["temperature"] / (df["temperature"] + 237.3)
+    #     )
+
+    #     # Saturation slope vapour pressure curve at Thr [kPa °C-1] (Equation 13)
+    #     capital_delta = (
+    #         4098
+    #         * (
+    #             0.6108
+    #             * np.exp((17.27 * df["temperature"]) / (df["temperature"] + 237.3))
+    #         )
+    #     ) / (df["temperature"] + 237.3) ** 2
+
+    #     # Reference evapotranspiration [mm period-1]
+    #     ET_o = ((
+    #         0.408 * capital_delta * (Rn - G)
+    #         + gamma * (37 / (df["temperature"] + 273)) * u2 * (E0_thr - ea)
+    #     ) / (capital_delta + gamma * (1 + 0.34 * u2))).rename("ETo")
+
+    #     return ET_o.round(4)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: HungaroMetConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+):
+    state = hass.states.get(config_entry.data[CONF_ZONE])
+    if state:
+        location_name = state.attributes.get("friendly_name")
+    else:
+        location_name = config_entry[CONF_ZONE]
+
+    coordinator_10_min = config_entry.runtime_data.coordinator_10_min
+    coordinator_msg_cloud_type = config_entry.runtime_data.coordinator_msg_cloud_type
+
+    async_add_entities(
+        [
+            OdpPrecipitationSensor(location_name, coordinator_10_min),
+            OdpReferenceEvapotranspiration(location_name, coordinator_10_min),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="temperature",
+                    name=f"HungaroMet - {location_name} temperature",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    device_class=SensorDeviceClass.TEMPERATURE,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:thermometer",
+                    native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+                ),
+                "ta",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="pressure",
+                    name=f"HungaroMet - {location_name} pressure",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    device_class=SensorDeviceClass.ATMOSPHERIC_PRESSURE,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:gauge",
+                    native_unit_of_measurement=UnitOfPressure.HPA,
+                ),
+                "p",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="wind_speed",
+                    name=f"HungaroMet - {location_name} wind speed",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    device_class=SensorDeviceClass.WIND_SPEED,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:weather-windy",
+                    native_unit_of_measurement=UnitOfSpeed.METERS_PER_SECOND,
+                ),
+                "fs",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="wind_speed",
+                    name=f"HungaroMet - {location_name} wind gust",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    device_class=SensorDeviceClass.WIND_SPEED,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:weather-windy",
+                    native_unit_of_measurement=UnitOfSpeed.METERS_PER_SECOND,
+                ),
+                "fx",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="wind_direction",
+                    name=f"HungaroMet - {location_name} wind direction",
+                    state_class=SensorStateClass.MEASUREMENT_ANGLE,
+                    device_class=SensorDeviceClass.WIND_DIRECTION,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:weather-windy",
+                    native_unit_of_measurement=DEGREE,
+                ),
+                "fsd",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="wind_speed",
+                    name=f"HungaroMet - {location_name} visibility",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    device_class=SensorDeviceClass.DISTANCE,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:weather-fog",
+                    native_unit_of_measurement=UnitOfLength.METERS,
+                ),
+                "v",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="rain",
+                    name=f"HungaroMet - {location_name} rain",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    device_class=SensorDeviceClass.PRECIPITATION,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:weather-pouring",
+                    native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+                ),
+                "r",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="relative_humidity",
+                    name=f"HungaroMet - {location_name} relative humidity",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    device_class=SensorDeviceClass.HUMIDITY,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:water-percent",
+                    native_unit_of_measurement=PERCENTAGE,
+                ),
+                "u",
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="uv",
+                    name=f"HungaroMet - {location_name} UV index",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:weather-sunny-alert",
+                    native_unit_of_measurement=UV_INDEX,
+                ),
+                "suv",
+                lambda suv: round(suv * (210 / 90), 1) if suv is not None else None,
+            ),
+            HungaroMetSensor(
+                location_name,
+                coordinator_10_min,
+                SensorEntityDescription(
+                    key="global_irradiance",
+                    name=f"HungaroMet - {location_name} global irradiance",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    icon="mdi:weather-sunny",
+                    native_unit_of_measurement=UnitOfIrradiance.WATTS_PER_SQUARE_METER,
+                ),
+                "sr",
+            ),
+            HungaroMetCloudinessSensor(location_name, coordinator_msg_cloud_type),
+        ]
+    )
+
+    return True

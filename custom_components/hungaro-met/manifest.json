@@ -1,0 +1,14 @@
+{
+  "domain": "hungaro-met",
+  "name": "HungaroMet",
+  "codeowners": [
+    "@laszlojakab"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/laszlojakab/home-assistant-hungar-met#usage",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/laszlojakab/home-assistant-hungar-met/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
