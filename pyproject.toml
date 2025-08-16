@@ -1,0 +1,98 @@
+[project]
+name = "home-assistant-hungaro-met"
+version = "0.1.0"
+description = "Home Assistant integration of HungaroMet"
+readme = "README.md"
+requires-python = ">=3.13.2"
+dependencies = []
+
+[dependency-groups]
+dev = ["homeassistant>=2025.7.0", "ruff>=0.12.8"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+
+[tool.ruff.lint]
+select = [
+  "F",     # pyflakes
+  "E",     # pycodestyle-errors
+  "W",     # pycodestyle-warnings
+  "C90",   # mccabe
+  "I",     # isort
+  "N",     # pep8-naming
+  "D",     # pydocstyle
+  "UP",    # pyupgrade
+  "YTT",   # flake8-2020
+  "ANN",   # flake8-annotations
+  "ASYNC", # flake8-async
+  "S",     # flake8-bandit
+  "BLE",   # flake8-blind-except
+  # "FBT",  # flake8-boolean-trap (completely forbids bools in signatures)
+  "B", # flake8-bugbear
+  "A", # flake8-builtins
+  # "COM",  # flake8-commas (trailing comma related rules)
+  # "CPY",  # copyright-related rules (each file must have copyright info at top)
+  "C4",  # flake8-comprehensions
+  "DTZ", # flake8-datetimez
+  "T10", # flake8-debugger
+  # "DJ",  # flake8-django (rules for Django which we don't use)
+  # "EM",  # flake8-errmsg (error messages must have preassigned variable names)
+  "EXE",  # flake8-executable
+  "FA",   # flake8-future-annotations
+  "ISC",  # flake8-implicit-str-concat
+  "ICN",  # flake8-import-conventions
+  "G",    # flake8-logging-format
+  "INP",  # flake8-no-pep420
+  "PIE",  # flake8-pie
+  "T20",  # flake8-print
+  "PYI",  # flake8-pyi
+  "PT",   # flake8-pytest-style
+  "Q",    # flake8-quotes
+  "RSE",  # flake8-raise
+  "RET",  # flake8-return
+  "SLF",  # flake8-self
+  "SLOT", # flake8-slots
+  "SIM",  # flake8-simplify
+  "TID",  # flake8-tidy-imports
+  "TCH",  # flake8-type-checking
+  "INT",  # flake8-gettext
+  "ARG",  # flake8-unused-arguments
+  # "PTH",  # flake8-use-pathlib (forbids the use of os in favor of pathlib)
+  "TD",  # flake8-todos
+  "FIX", # flake8-fixme (forbids the use of TODO items)
+  "ERA", # eradicate
+  "PD",  # pandas-vet
+  "PGH", # pygrep-hooks
+  "PL",  # pylint
+  "TRY", # tryceratops
+  "FLY", # flynt
+  "NPY", # numpy-specific rules
+  # "AIR",  # airflow-specific rules (rules for Airflow which we don't use)
+  "PERF", # perflint
+  "RUF",  # ruff-specific rules
+]
+
+
+ignore = [
+  "D203", # 1 blank line required before class docstring (opposite of D211)
+  "D212", # Multi-line docstring summary should start at the first line (opposite of D213)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
